@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Voice Assistant — UI Demo</title>
+  <style>
+    :root {
+      font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+      --orb-size: 150px;
+      --orb-color-idle: #2563eb;
+      --orb-color-active: #10b981;
+      --orb-color-error: #ef4444;
+    }
+    /* Make body a grid container to center everything */
+    body {
+      display: grid;
+      place-items: center;
+      min-height: 100vh;
+      margin: 0;
+      background: #071029;
+      color: #e6eef8;
+      overflow: hidden;
+    }
+    /* The card is now just a positioning anchor, no fixed size */
+    .card {
+      display: grid;
+      place-items: center;
+      position: relative;
+    }
+    /* Canvas now covers the entire viewport */
+    #waveCanvas {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 1;
+    }
+    #orb {
+      width: var(--orb-size);
+      height: var(--orb-size);
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      cursor: pointer;
+      position: relative;
+      background: radial-gradient(circle at 70% 30%, #fff, rgba(255,255,255,0) 70%), var(--orb-color-idle);
+      box-shadow: 0 10px 40px -10px rgba(37, 99, 235, 0.5);
+      transition: background 300ms ease, box-shadow 300ms ease;
+      z-index: 2;
+    }
+    #orb svg {
+      width: calc(var(--orb-size) * 0.4);
+      height: calc(var(--orb-size) * 0.4);
+      fill: #fff;
+      position: relative;
+      z-index: 1; 
+      transition: transform 300ms ease;
+    }
+    body.connecting #orb { animation: pulse 1.5s infinite ease-in-out; }
+    @keyframes pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+    body.in-call #orb {
+      background: radial-gradient(circle at 70% 30%, #fff, rgba(255,255,255,0) 70%), var(--orb-color-active);
+      box-shadow: 0 10px 40px -10px rgba(16, 185, 129, 0.6);
+    }
+    body.error #orb {
+      background: var(--orb-color-error);
+      box-shadow: 0 10px 40px -10px var(--orb-color-error);
+      animation: shake 0.5s;
+    }
+    @keyframes shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-5px); } 75% { transform: translateX(5px); } }
+    #status {
+      position: absolute;
+      /* Positioned relative to the card, which is centered */
+      top: calc(var(--orb-size) / 2 + 20px);
+      font-size: 16px;
+      color: #9fb4d6;
+      background: rgba(8, 20, 43, 0.8);
+      padding: 6px 14px;
+      border-radius: 20px;
+      backdrop-filter: blur(5px);
+      opacity: 0;
+      transform: translateY(10px);
+      transition: opacity 300ms ease, transform 300ms ease;
+      pointer-events: none;
+      z-index: 3;
+    }
+    #orb:hover ~ #status { /* Use general sibling combinator ~ */
+      opacity: 1;
+      transform: translateY(0);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="waveCanvas"></canvas>
+  <div class="card">
+    <div id="orb">
+      <svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"></path></svg>
+    </div>
+    <div id="status">Tap to Connect</div>
+  </div>
+
+  <script>
+    const orb = document.getElementById('orb');
+    const statusEl = document.getElementById('status');
+    const body = document.body;
+    const canvas = document.getElementById('waveCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // State
+    let isCalling = false;
+    let ws = null;
+    let audioCtx = null;
+    let micStream = null;
+    let micSource = null;
+    let workletNode = null;
+    let playQueueTime = 0;
+    const MAX_QUEUE_DELAY = 0.6;
+
+    // Audio Analysis State
+    let micAnalyser, spkAnalyser;
+    let micFrequencyData, spkFrequencyData;
+
+    // Visualization Parameters
+    const FFT_SIZE = 256;
+    const WAVE_POINTS = 128; 
+    const BASE_RADIUS = 100; // Slightly larger base
+    const WAVE_AMPLITUDE = 80; // Much larger amplitude for longer peaks
+
+    function setupCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      // Size canvas to the full window
+      canvas.width = window.innerWidth * dpr;
+      canvas.height = window.innerHeight * dpr;
+      ctx.scale(dpr, dpr);
+      canvas.style.width = `${window.innerWidth}px`;
+      canvas.style.height = `${window.innerHeight}px`;
+    }
+    setupCanvas();
+    window.addEventListener('resize', setupCanvas);
+    
+    // UPDATED drawWave function
+    function drawWave() {
+      if (!isCalling) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        return;
+      }
+      requestAnimationFrame(drawWave);
+
+      micAnalyser.getByteFrequencyData(micFrequencyData);
+      let micLevel = micFrequencyData.reduce((a, b) => a + b, 0) / micFrequencyData.length;
+
+      let spkLevel = 0;
+      if (spkAnalyser) {
+        spkAnalyser.getByteFrequencyData(spkFrequencyData);
+        spkLevel = spkFrequencyData.reduce((a, b) => a + b, 0) / spkFrequencyData.length;
+      }
+      
+      const isAssistantSpeaking = spkLevel > micLevel;
+      const dataArray = isAssistantSpeaking ? spkFrequencyData : micFrequencyData;
+      
+      let color, currentRadius, currentAmplitude, lineWidth;
+      if (isAssistantSpeaking) { // Assistant (Outward)
+        color = 'rgba(16, 185, 129, 0.9)';
+        currentRadius = BASE_RADIUS * 1.1;
+        currentAmplitude = WAVE_AMPLITUDE * 1.2;
+        lineWidth = 2.5;
+      } else { // User (Inward)
+        color = 'rgba(60, 130, 255, 0.9)';
+        currentRadius = BASE_RADIUS * 0.9;
+        currentAmplitude = WAVE_AMPLITUDE * 0.8;
+        lineWidth = 2;
+      }
+      
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.lineWidth = lineWidth;
+      ctx.strokeStyle = color;
+      ctx.beginPath();
+      
+      // Center drawing in the full viewport
+      const centerX = window.innerWidth / 2;
+      const centerY = window.innerHeight / 2;
+      
+      const angleStep = (Math.PI * 2) / WAVE_POINTS;
+      
+      for (let i = 0; i < WAVE_POINTS; i++) {
+        const angle = i * angleStep;
+        const dataIndex = Math.floor((i / WAVE_POINTS) * (FFT_SIZE / 3));
+        
+        // --- Exponential curve for sharper peaks ---
+        const v = Math.pow(dataArray[dataIndex] / 255.0, 4); 
+        const radius = currentRadius + v * currentAmplitude;
+        
+        const x = centerX + radius * Math.cos(angle - Math.PI / 2);
+        const y = centerY + radius * Math.sin(angle - Math.PI / 2);
+        
+        if (i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      
+      // --- Seamlessly close the loop ---
+      ctx.closePath(); 
+      ctx.stroke();
+    }
+
+    // --- All other functions (resampleLinear, playPCM16, etc.) remain the same ---
+
+    function resampleLinear(inSamples, inRate, outRate) {
+        if (inRate === outRate) return inSamples;
+        const srcLen = inSamples.length;
+        const dstLen = Math.round(srcLen * outRate / inRate);
+        const dst = new Float32Array(dstLen);
+        const ratio = srcLen / dstLen;
+        for (let i = 0; i < dstLen; i++) {
+            const pos = i * ratio;
+            const i0 = Math.floor(pos);
+            const i1 = Math.min(i0 + 1, srcLen - 1);
+            const frac = pos - i0;
+            dst[i] = inSamples[i0] * (1 - frac) + inSamples[i1] * frac;
+        }
+        return dst;
+    }
+
+    function playPCM16(arrayBuffer, srcSampleRate = 16000) {
+      if (!audioCtx) return;
+      const i16 = new Int16Array(arrayBuffer);
+      const f32 = new Float32Array(i16.length);
+      for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+
+      const outRate = audioCtx.sampleRate;
+      const resampled = resampleLinear(f32, srcSampleRate, outRate);
+
+      const buffer = audioCtx.createBuffer(1, resampled.length, outRate);
+      buffer.getChannelData(0).set(resampled);
+
+      const src = audioCtx.createBufferSource();
+      src.buffer = buffer;
+
+      if (!spkAnalyser) {
+        spkAnalyser = audioCtx.createAnalyser();
+        spkAnalyser.fftSize = FFT_SIZE;
+        spkFrequencyData = new Uint8Array(spkAnalyser.frequencyBinCount);
+      }
+      src.connect(spkAnalyser).connect(audioCtx.destination);
+
+      const now = audioCtx.currentTime;
+      if (playQueueTime < now) playQueueTime = now + 0.02;
+      if (playQueueTime - now > MAX_QUEUE_DELAY) playQueueTime = now + 0.02;
+      
+      src.start(playQueueTime);
+      playQueueTime += buffer.duration;
+    }
+
+    const workletSrc = `class MicDownsampler extends AudioWorkletProcessor{constructor(){super();this._buf=new Float32Array(0);this._ratio=3;this._minOutSamples=160}process(n){const t=n[0]?.[0];if(!t)return!0;const s=new Float32Array(this._buf.length+t.length);s.set(this._buf,0),s.set(t,this._buf.length),this._buf=s;const i=Math.floor(this._buf.length/this._ratio);if(i>=this._minOutSamples){const n=new Float32Array(i);for(let t=0;t<i;t++){const s=t*this._ratio;let e=0;for(let n=0;n<this._ratio;n++)e+=this._buf[s+n];n[t]=e/this._ratio}this._buf=this._buf.subarray(i*this._ratio);const t=new Int16Array(n.length);for(let s=0;s<n.length;s++)t[s]=Math.max(-32768,Math.min(32767,Math.round(n[s]*32767)));this.port.postMessage(t.buffer,[t.buffer])}return!0}}registerProcessor("mic-downsampler",MicDownsampler);`;
+
+    async function startCall() {
+      if (isCalling) return;
+      
+      body.classList.remove('error');
+      body.classList.add('connecting');
+      statusEl.textContent = 'Connecting...';
+
+      if (!audioCtx || audioCtx.state === 'closed') {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+
+      try {
+        await audioCtx.audioWorklet.addModule(URL.createObjectURL(new Blob([workletSrc], { type: 'application/javascript' })));
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: true }});
+        micSource = audioCtx.createMediaStreamSource(micStream);
+        
+        micAnalyser = audioCtx.createAnalyser();
+        micAnalyser.fftSize = FFT_SIZE;
+        micFrequencyData = new Uint8Array(micAnalyser.frequencyBinCount);
+
+        workletNode = new AudioWorkletNode(audioCtx, 'mic-downsampler');
+        workletNode.port.onmessage = (ev) => {
+          if (ws?.readyState === WebSocket.OPEN) ws.send(ev.data);
+        };
+        
+        micSource.connect(micAnalyser).connect(workletNode).connect(audioCtx.destination);
+
+      } catch (err) {
+        console.error('Mic setup failed', err);
+        statusEl.textContent = 'Mic setup failed';
+        body.classList.add('error');
+        hangUp();
+        return;
+      }
+
+      const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+      ws = new WebSocket(wsUrl);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = () => {
+        isCalling = true;
+        body.classList.remove('connecting');
+        body.classList.add('in-call');
+        statusEl.textContent = 'Tap to Hang Up';
+        playQueueTime = audioCtx.currentTime;
+        drawWave();
+      };
+
+      ws.onmessage = async (ev) => {
+        const ab = ev.data instanceof ArrayBuffer ? ev.data : await ev.data.arrayBuffer();
+        playPCM16(ab, 16000);
+      };
+
+      ws.onclose = () => { statusEl.textContent = 'Connection Closed'; hangUp(); };
+      ws.onerror = (e) => { console.error('WebSocket error', e); statusEl.textContent = 'Connection Error'; body.classList.add('error'); hangUp(); };
+    }
+
+    function hangUp() {
+      isCalling = false;
+      body.classList.remove('in-call', 'connecting', 'error');
+      statusEl.textContent = 'Tap to Connect';
+      
+      if (ws) { try { ws.close(); } catch (e) {} ws = null; }
+      
+      if(workletNode) workletNode.disconnect();
+      if(micAnalyser) micAnalyser.disconnect();
+      if(micSource) micSource.disconnect();
+      if(micStream) micStream.getTracks().forEach(t => t.stop());
+      micStream = micSource = workletNode = micAnalyser = spkAnalyser = null;
+    }
+
+    orb.addEventListener('click', () => { isCalling ? hangUp() : startCall(); });
+    window.addEventListener('beforeunload', () => { if (isCalling) hangUp(); });
+  </script>
+</body>
+</html>
