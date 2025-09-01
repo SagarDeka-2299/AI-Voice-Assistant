@@ -1,0 +1,13 @@
+dotenv==0.9.9
+fastapi==0.116.1
+faster-whisper==1.2.0
+silero-vad==5.1.2
+TTS==0.22.0
+kokoro==0.9.4
+langchain==0.3.27
+langchain-openai==0.3.31
+numpy==1.22.0
+scipy==1.11.4
+transformers==4.38.2
+uvloop==0.21.0
+websockets==15.0.1
