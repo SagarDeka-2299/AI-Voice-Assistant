@@ -8,12 +8,15 @@ import uvloop
 set_event_loop_policy(uvloop.EventLoopPolicy())
 
 def i16_bytes_to_f32_ndarray(chunk: bytes) -> NDArray[np.float32]:
+    """convert from 16 bit int array into float32 numpy ndarray"""
     return np.frombuffer(chunk, dtype=np.int16).astype(np.float32, copy=False) / 32768.0
 
 def f32_ndarray_to_i16_bytes(arr: NDArray[np.float32]) -> bytes:
+    """convert from float32 numpy ndarray into 16 bit int array"""
     return np.clip(arr * 32767, -32768, 32767).astype(np.int16, copy=False).tobytes()
 
 class Accumulator(ABC):
+    """It accumulates any value untill some condition is met to call overflow and pass accumulated data"""
     def __init__(self):
         self.data: List=[]
         self.length=0
@@ -42,6 +45,7 @@ class Accumulator(ABC):
         pass
 
     async def manual_overflow(self):
+        """manually overflow to get all remaining data accumulated"""
         await self.on_overflow()
         self.clear()
 
@@ -53,6 +57,7 @@ class Accumulator(ABC):
 
 
 class AudioF32Accumulator(Accumulator):
+    """Accumulates float32 numpy array as audio chunks"""
     def __init__(self,callback: Callable[[NDArray[np.float32]],Awaitable[None]],max_size:int=-1):
         self.on_overflow_callback=callback
         self.max_size=max_size
@@ -69,6 +74,7 @@ class AudioF32Accumulator(Accumulator):
         await self.on_overflow_callback(total_chunk)
 
 class AudioBytesAccumulatorFixedSize(Accumulator):
+    """Accumulates 16 bit int bytes of audio upto a fixed size"""
     def __init__(self,callback: Callable[[bytes],Awaitable[None]], size:int=1024):
         self.on_overflow_callback=callback
         self.size=size
@@ -86,6 +92,7 @@ class AudioBytesAccumulatorFixedSize(Accumulator):
         
 
 class StrAccumulator(Accumulator):
+    """Accumulates string (beyond a minimum length), untill end of sentense is found"""
     def __init__(self, callback:Callable[[str],Awaitable[None]], min_length: int = 10):
         super().__init__()
         self.min_length = min_length
@@ -128,7 +135,7 @@ class VoiceAssistant(ABC):
         self.query_ready=Event()
         self.answer_ready=Event()
 
-        self.current_user_query=Queue(maxsize=1)
+        self.current_user_query=Queue(maxsize=1)#one query will be stored, if new segments come in, just merge with it
 
         self.listener_queue:Queue[bytes]=Queue()
         self.vad_to_asr_speech_chunk_queue:Queue[NDArray[np.float32]]=Queue() #User audio speech segemnt queue, 🔊--> VAD --> Queue[🗣️] --> ASR --> 🔤
@@ -178,7 +185,7 @@ class VoiceAssistant(ABC):
             chunk_f32=i16_bytes_to_f32_ndarray(chunk)
             is_speech = await self.Detect_Speech(chunk_f32)
             if is_speech:
-                print("🗣️")
+                # print("🗣️")
                 if not self.user_talking.is_set():
                     await self.On_Interruption()
                     self.user_talking.set()
@@ -195,7 +202,7 @@ class VoiceAssistant(ABC):
             chunk = await self.vad_to_asr_speech_chunk_queue.get()
             self.query_ready.clear()
             text = await self.Transcribe_Speech(chunk)
-            print(f"transcription 🗣️ ➡️ 🔤 {text}")
+            # print(f"transcription 🗣️ ➡️ 🔤 {text}")
             if self.current_user_query.full():
                 last_query=self.current_user_query.get_nowait()
                 text+=last_query
@@ -205,6 +212,7 @@ class VoiceAssistant(ABC):
 
                 
     async def queue_speech(self, txt:str):
+        """use this to put text to talk, can be used from external code to talk manually"""
         if len(txt.strip()):
             await self.llm_to_tts_text_chunk_queue.put(txt)
             self.answer_ready.set()
@@ -226,16 +234,16 @@ class VoiceAssistant(ABC):
                 print("🚦thinking stopped, clearing llm_to_tts_text_chunk_queue")
 
         while True:
-            print("waiting for query to ready, so that, start thinking")
+            # print("waiting for query to ready, so that, start thinking")
             await self.query_ready.wait()
-            print("query is ready, so start thinking")
-            print("waiting for current user query for the queue")
+            # print("query is ready, so start thinking")
+            # print("waiting for current user query for the queue")
             query=await self.current_user_query.get()
-            print(f"current user query: {query}")
+            # print(f"current user query: {query}")
             current_thinking_task=create_task(thinking_task(query))
-            print("waiting for user to talk, so that, cancel thinking")
+            # print("waiting for user to talk, so that, cancel thinking")
             await self.user_talking.wait()
-            print("user talked, so cancelling thinking")
+            # print("user talked, so cancelling thinking")
             current_thinking_task.cancel()
             self.answer_ready.clear()
             self.llm_to_tts_text_chunk_queue=Queue()
@@ -248,31 +256,32 @@ class VoiceAssistant(ABC):
             try:
                 while True:
                     text = await self.llm_to_tts_text_chunk_queue.get()
-                    print(f"🔄generating 🗣️:  {text}")
+                    # print(f"🔄generating 🗣️:  {text}")
                     async for speech in self.Speech_Generator(text):
                         #resample
                         if self.tts_sample_rate_khz != self.output_sample_rate_khz:
                             speech = resample_poly(speech, up=self.output_sample_rate_khz, down=self.tts_sample_rate_khz).astype(np.float32)
                         speech_i16bytes=f32_ndarray_to_i16_bytes(speech)
                         await self.tts_speech_output_accumulator.accumulate(speech_i16bytes)
-                    print(f"✅generated 🗣️:  {text}")
+                    # print(f"✅generated 🗣️:  {text}")
                     if self.llm_to_tts_text_chunk_queue.empty():
                         await self.tts_speech_output_accumulator.manual_overflow()
                         self.answer_ready.clear()
             except CancelledError:
                 print("🚦speech generation stopped")
         while True:
-            print("waiting for answer ready, so that, start speeking")
+            # print("waiting for answer ready, so that, start speeking")
             await self.answer_ready.wait()
-            print("answer ready, so start speeking")
+            # print("answer ready, so start speeking")
             speech_synthesiser_task=create_task(speech_generation_task())
-            print("waiting for user to talk, so that, cancel speech generation")
+            # print("waiting for user to talk, so that, cancel speech generation")
             await self.user_talking.wait()
-            print("user talking, cancelling speech generation")
+            # print("user talking, cancelling speech generation")
             speech_synthesiser_task.cancel()
 
 
     async def Put_Input_Audio_i16_Bytes(self, chunk: bytes)->None:
+        """call this to put audio chunks of unknown size from some audio source"""
         await self.input_to_vad_chunk_accumulator.accumulate(chunk)
 
 

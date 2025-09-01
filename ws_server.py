@@ -155,7 +155,8 @@ async def ws_endpoint(websocket: WebSocket):
             await app.state.assistant.Put_Input_Audio_i16_Bytes(data)
 
     except WebSocketDisconnect:
-        with open(f"chat_history_{str(websocket)}.txt", "w") as f:
+        #saving the message history as a text file
+        with open(f"chat_history.txt", "w") as f:
             for message in app.state.assistant.message_history:
                 f.write(f"{message.type.upper()}: {message.content}\n")
         print("Web socket disconnected")
