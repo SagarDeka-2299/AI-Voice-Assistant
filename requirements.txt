@@ -1,6 +1,5 @@
-torch==2.2.0+cu121
-torchaudio==2.2.0+cu121
---extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.8.0
+torchaudio==2.8.0
 dotenv==0.9.9
 fastapi==0.116.1
 faster-whisper==1.2.0

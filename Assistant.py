@@ -93,7 +93,7 @@ class AudioBytesAccumulatorFixedSize(Accumulator):
 
 class StrAccumulator(Accumulator):
     """Accumulates string (beyond a minimum length), untill end of sentense is found"""
-    def __init__(self, callback:Callable[[str],Awaitable[None]], min_length: int = 10):
+    def __init__(self, callback:Callable[[str],Awaitable[None]], min_length: int = 20):
         super().__init__()
         self.min_length = min_length
         # self.max_length = max_length
@@ -151,7 +151,7 @@ class VoiceAssistant(ABC):
         self.vad_to_asr_speech_accumulator=AudioF32Accumulator(callback=on_asr_speech_chunk_overflow,max_size=input_sample_rate_khz*asr_chunk_duration_ms)
 
         async def on_audio_output_chunk_overflow(chunk: bytes):
-            print("putting chunk to output audio queue 📤")
+            print("📤 🔊")
             await self.Handle_Output_Audio_i16_Bytes(chunk=chunk)
             
         self.tts_speech_output_accumulator=AudioBytesAccumulatorFixedSize(callback=on_audio_output_chunk_overflow, size=output_sample_rate_khz*output_chunk_duration_ms*2)
@@ -185,8 +185,7 @@ class VoiceAssistant(ABC):
             chunk_f32=i16_bytes_to_f32_ndarray(chunk)
             is_speech = await self.Detect_Speech(chunk_f32)
             if is_speech:
-                # print("🗣️")
-                await self.On_Interruption()
+                print("🗣️")
                 self.user_talking.set()
                 silence_timer=reset_timer(old_handle=silence_timer)
 
@@ -277,6 +276,8 @@ class VoiceAssistant(ABC):
             await self.user_talking.wait()
             # print("user talking, cancelling speech generation")
             speech_synthesiser_task.cancel()
+
+            await self.On_Interruption()
 
 
     async def Put_Input_Audio_i16_Bytes(self, chunk: bytes)->None:
