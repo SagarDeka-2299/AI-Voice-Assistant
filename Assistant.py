@@ -186,9 +186,8 @@ class VoiceAssistant(ABC):
             is_speech = await self.Detect_Speech(chunk_f32)
             if is_speech:
                 # print("🗣️")
-                if not self.user_talking.is_set():
-                    await self.On_Interruption()
-                    self.user_talking.set()
+                await self.On_Interruption()
+                self.user_talking.set()
                 silence_timer=reset_timer(old_handle=silence_timer)
 
             elif not self.user_talking.is_set():
